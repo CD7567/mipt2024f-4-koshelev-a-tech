@@ -1,0 +1,23 @@
+variables:
+  SLAVE_IMAGE: alpine/ansible:2.17.0
+  RELEASE_BRANCH_REGEXP: /^release\/.*$/
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ $RELEASE_BRANCH_REGEXP
+
+stages:
+  - deploy
+
+deploy:
+  image: $SLAVE_IMAGE
+  stage: deploy
+  script:
+    - export ANSIBLE_CONFIG="./ansible.cfg"
+    - echo "$CI_ANSIBLE_VAULT_PASS" > passwd
+    - cd vault
+    - ansible-vault decrypt $(ls) --vault-password ../passwd
+    - cd ..
+    - ansible-playbook deploy-playbook.yml
+  tags:
+    - dind

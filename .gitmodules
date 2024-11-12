@@ -1,0 +1,3 @@
+[submodule "mipt2024s-algo"]
+	path = mipt2024s-algo
+	url = git@github.com:CD7567/mipt2024s-3-koshelev-a-algo.git

@@ -1,0 +1,167 @@
+# Disable the Gradle daemon for Continuous Integration servers as correctness
+# is usually a priority over speed in CI environments. Using a fresh
+# runtime for each build is more reliable since the runtime is completely
+# isolated from any previous builds.
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  POSTGRES_DB: "postgres"
+  POSTGRES_USER: "studoko_user"
+  POSTGRES_PASSWORD: "studoko_password"
+  BACKEND_BASE_IMAGE: gradle:jdk17-jammy
+  SPRING_BASE_IMAGE: gradle:8.10.1-jdk21-graal
+  FRONTEND_BASE_IMAGE: node:alpine
+  WORKER_BASE_IMAGE: docker:27.3.1-alpine3.20
+  WORKER_DIND_IMAGE: docker:27.3.1-dind-alpine3.20
+  DBDOCS_TOKEN: $DBDOCS_TOKEN
+  CI_REGISTRY: $CI_REGISTRY
+  CI_REGISTRY_USER: $CI_REGISTRY_USER
+  CI_REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+  DEV_BRANCH_REGEXP: /^dev\/.*$/
+  RELEASE_BRANCH_REGEXP: /^release\/.*$/
+
+default:
+  services:
+    - name: postgres:alpine3.17
+      alias: postgres
+    - name: $WORKER_DIND_IMAGE
+      alias: docker
+
+before_script:
+  - GRADLE_USER_HOME="$(pwd)/.gradle"
+  - export GRADLE_USER_HOME
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ $DEV_BRANCH_REGEXP
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ $DEV_BRANCH_REGEXP
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ $RELEASE_BRANCH_REGEXP
+
+stages:
+  - lint
+  - build
+  - test
+  - publish
+
+backend_lint:
+  image: ${BACKEND_BASE_IMAGE}
+  stage: lint
+  script: gradle ktlintCheck
+
+spring_lint:
+  image: ${SPRING_BASE_IMAGE}
+  stage: lint
+  script:
+    - cd backend
+    - gradle spotlessJavaCheck
+
+frontend_lint:
+  image: ${FRONTEND_BASE_IMAGE}
+  stage: lint
+  script:
+    - cd studoko-frontend
+    - npm ci
+    - npm run lint
+  cache:
+    key: "$CI_COMMIT_REF_NAME"
+    policy: push
+    paths:
+      - studoko-frontend/node_modules
+
+backend_build:
+  image: ${BACKEND_BASE_IMAGE}
+  stage: build
+  script: gradle --build-cache assemble
+  cache:
+    key: "$CI_COMMIT_REF_NAME"
+    policy: push
+    paths:
+      - studoko-backend/build
+      - .gradle
+
+spring_build:
+  image: ${SPRING_BASE_IMAGE}
+  stage: build
+  script:
+    - cd backend
+    - gradle --build-cache assemble
+  cache:
+    key: "$CI_COMMIT_REF_NAME"
+    policy: push
+    paths:
+      - backend/build
+      - .gradle
+
+frontend_build:
+  image: ${FRONTEND_BASE_IMAGE}
+  stage: build
+  script:
+    - cd studoko-frontend
+    - npm ci
+    - npm run build
+  cache:
+    key: "$CI_COMMIT_REF_NAME"
+    policy: pull-push
+    paths:
+      - studoko-frontend/node_modules
+      - studoko-frontend/build
+
+dbdocs_build:
+  image: node:alpine
+  stage: build
+  script:
+    - npm install -g dbdocs
+    - dbdocs build docs/db/scheme.dbml
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+backend_test:
+  image: ${BACKEND_BASE_IMAGE}
+  stage: test
+  script: gradle cleanTest :studoko-backend:test -Pci
+  cache:
+    key: "$CI_COMMIT_REF_NAME"
+    policy: pull
+    paths:
+      - studoko-backend/build
+      - .gradle
+
+publish_dev:
+  image: ${WORKER_BASE_IMAGE}
+  stage: publish
+  script:
+    - VERSION=$(echo "$CI_COMMIT_BRANCH" | sed 's/^dev\///')
+    - CONTAINER_TAG=${VERSION}-dev-$CI_COMMIT_SHORT_SHA
+    - 'echo "tag: $CI_COMMIT_SHORT_SHA" > studoko-backend/main/resources/buildArgs.yaml'
+    - 'echo "{ \"tag\": \"$CI_COMMIT_SHORT_SHA\" }" > studoko-frontend/buildArgs.json'
+    - docker build -t $CI_REGISTRY/admins/studoko-system/studoko-backend:$CONTAINER_TAG -f studoko-backend/Dockerfile .
+    - docker build -t $CI_REGISTRY/admins/studoko-system/studoko-frontend:$CONTAINER_TAG -f studoko-frontend/Dockerfile .
+    - docker build -t $CI_REGISTRY/admins/studoko-system/studoko-nginx:$CONTAINER_TAG -f nginx/dev/Dockerfile .
+    - echo "$CI_DEPLOY_PASSWORD" | docker login $CI_REGISTRY -u $CI_DEPLOY_USER --password-stdin
+    - docker push $CI_REGISTRY/admins/studoko-system/studoko-backend:$CONTAINER_TAG
+    - docker push $CI_REGISTRY/admins/studoko-system/studoko-frontend:$CONTAINER_TAG
+    - docker push $CI_REGISTRY/admins/studoko-system/studoko-nginx:$CONTAINER_TAG
+  tags:
+    - dind
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ $DEV_BRANCH_REGEXP
+
+publish_release:
+  image: ${WORKER_BASE_IMAGE}
+  stage: publish
+  script:
+    - VERSION=$(echo "$CI_COMMIT_BRANCH" | sed 's/^release\///')
+    - CONTAINER_TAG=${VERSION}
+    - docker build -t $CI_REGISTRY/admins/studoko-system/studoko-backend:$CONTAINER_TAG -f studoko-backend/Dockerfile .
+    - docker build -t $CI_REGISTRY/admins/studoko-system/studoko-frontend:$CONTAINER_TAG -f studoko-frontend/Dockerfile .
+    - docker build -t $CI_REGISTRY/admins/studoko-system/studoko-nginx:$CONTAINER_TAG -f nginx/dev/Dockerfile .
+    - echo "$CI_DEPLOY_PASSWORD" | docker login $CI_REGISTRY -u $CI_DEPLOY_USER --password-stdin
+    - docker push $CI_REGISTRY/admins/studoko-system/studoko-backend:$CONTAINER_TAG
+    - docker push $CI_REGISTRY/admins/studoko-system/studoko-frontend:$CONTAINER_TAG
+    - docker push $CI_REGISTRY/admins/studoko-system/studoko-nginx:$CONTAINER_TAG
+  tags:
+    - dind
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ $RELEASE_BRANCH_REGEXP

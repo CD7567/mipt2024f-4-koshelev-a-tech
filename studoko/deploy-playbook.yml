@@ -1,0 +1,64 @@
+---
+
+- name: Studoko deploy playbook
+  gather_facts: false
+  connection: ssh
+  hosts: prod
+
+  tasks:
+    - name: Ping remotes
+      ping:
+
+    - name: Kill studoko
+      raw: |
+        export containers="$(docker ps -q --filter name=^studoko-*)"
+        echo "=> Running studoko containers:"
+        echo $containers
+        if [[ $containers ]];
+        then echo "=> Stopping containers:" && docker container stop $containers;
+        else echo "No studoko running containers detected";
+        fi
+        echo "=> Performing prune"
+        docker container prune -f
+      register: killer
+
+    - name: Killer output
+      debug:
+        msg: "{{ killer.stdout_lines }}"
+
+    - name: Transfer compose files
+      copy:
+        src: ./compose
+        dest: .
+
+    - name: Docker login
+      shell: "echo \"{{ lookup('env', 'CI_DEPLOY_PASSWORD') }}\" | docker login {{ lookup('env', 'CI_REGISTRY') }} -u {{ lookup('env', 'CI_DEPLOY_USER')  }} --password-stdin"
+      register: login
+
+    - name: Login output
+      debug:
+        msg: "{{ login.stdout_lines }}"
+
+    - name: Compose studoko
+      shell: "docker compose -f ./compose/docker-compose-prod.yml up -d --quiet-pull"
+      register: compose
+
+    - name: Compose output
+      debug:
+        msg: "{{ compose.stdout_lines }}"
+
+    - name: Docker logout
+      shell: "docker logout {{ lookup('env', 'CI_REGISTRY') }}"
+      register: logout
+
+    - name: Docker logout output
+      debug:
+        msg: "{{ logout.stdout_lines }}"
+
+    - name: Cleanup
+      shell: "rm -rv ./compose"
+      register: cleanup
+
+    - name: Cleanup output
+      debug:
+        msg: "{{ cleanup.stdout_lines }}"
