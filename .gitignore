@@ -1,0 +1,17 @@
+# Idea
+.idea
+
+# Ignore Gradle project-specific cache directory
+.gradle
+
+# Ignore Gradle build output directory
+build
+
+# Npm build files
+package-lock.json
+
+# MacOS filesystem metadata
+.DS_Store
+
+# Logs
+*.log
